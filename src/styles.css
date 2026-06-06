@@ -1,0 +1,14 @@
+/* X Hidden Replies Revealer - styling for real X-rendered reply cells. */
+
+[data-hrx-hidden-reply="true"] {
+  position: relative;
+}
+
+[data-hrx-hidden-reply="true"] article {
+  position: relative;
+  background: rgba(255, 173, 31, 0.055);
+}
+
+[data-hrx-hidden-reply="true"]:hover article {
+  background: rgba(255, 173, 31, 0.1);
+}

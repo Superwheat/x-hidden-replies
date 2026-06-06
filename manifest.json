@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "X Hidden Replies Revealer",
+  "version": "1.0.0",
+  "description": "Automatically reveals replies hidden by the tweet author, merges them into the conversation, and clearly marks them.",
+  "icons": {},
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["src/inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["src/content.js"],
+      "css": ["src/styles.css"],
+      "run_at": "document_idle",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ]
+}
