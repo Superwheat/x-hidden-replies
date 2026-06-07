@@ -25,6 +25,10 @@
     return m ? m[1] : null;
   }
 
+  function isHiddenRepliesPage() {
+    return /\/status\/\d+\/hidden(?:[/?#]|$)/.test(location.pathname);
+  }
+
   function statusIdOf(article) {
     const timeLink = article.querySelector('a[href*="/status/"] time');
     const a = (timeLink && timeLink.closest('a')) || article.querySelector('a[href*="/status/"]');
@@ -87,6 +91,12 @@
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       const id = currentTweetId();
+      if (isHiddenRepliesPage()) {
+        lastTweetId = null;
+        markLoggedFor = null;
+        replyCells().forEach(clearHiddenMarker);
+        return;
+      }
       if (id !== lastTweetId) {
         lastTweetId = id;
         markLoggedFor = null;

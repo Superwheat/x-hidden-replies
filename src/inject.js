@@ -78,6 +78,7 @@
     graphqlPrefix: '/graphql'
   };
   const moderatedPromises = new Map(); // rootId -> Promise<{ok,results,ids}>
+  const moderatedMorePromises = new Map(); // rootId -> in-flight next hidden page
   const moderatedResults = new Map();  // rootId -> resolved {ok,results,ids}
   const hiddenThreadRepliesByParent = new Map(); // hidden reply id -> reply children captured from a hidden thread
   const hiddenIdsByRoot = new Map();   // rootId -> hidden reply ids embedded into TweetDetail
@@ -88,6 +89,10 @@
     const id = String(rootId);
     debugState.tweets[id] = Object.assign(debugState.tweets[id] || {}, patch);
     debugState.lastTweetId = id;
+  }
+
+  function isHiddenRepliesPage() {
+    return /\/status\/\d+\/hidden(?:[/?#]|$)/.test(location.pathname);
   }
 
   function debugGraphql(info, operationName) {
@@ -274,11 +279,14 @@
   }
 
   function setupXhrTweetDetailMerge(xhr, rawUrl, vars) {
-    if (!vars || !vars.focalTweetId || xhr.__hrxTweetDetailMergeInstalled) return;
+    if (!vars || !vars.focalTweetId || xhr.__hrxTweetDetailMergeInstalled || isHiddenRepliesPage()) return;
     xhr.__hrxTweetDetailMergeInstalled = true;
     const rootId = String(vars.focalTweetId);
     debugTweet(rootId, { tweetDetailIntercepted: true, tweetDetailTransport: 'xhr', tweetDetailCursor: !!vars.cursor, tweetDetailUrl: rawUrl, tweetDetailVarsSource: varsFromUrl(rawUrl) ? 'url' : 'body', interceptedAt: Date.now() });
-    getModerated(rootId);
+    getModerated(rootId).then(() => {
+      if (vars.cursor) return loadMoreModerated(rootId);
+      return moderatedResults.get(rootId);
+    }).catch(() => { /* ignore */ });
     installXhrResponseOverride(xhr);
 
     const rewrite = function () {
@@ -328,11 +336,12 @@
       const operationName = operationNameFor(gql, vars);
       debugGraphql(gql, operationName);
       if (operationName !== 'TweetDetail') return p;
+      if (isHiddenRepliesPage()) return p;
       if (!vars || !vars.focalTweetId) return p;
       const rootId = String(vars.focalTweetId);
       debugTweet(rootId, { tweetDetailIntercepted: true, tweetDetailCursor: !!vars.cursor, tweetDetailUrl: url, tweetDetailVarsSource: varsFromUrl(url) ? 'url' : 'body', interceptedAt: Date.now() });
       getModerated(rootId); // kick off the hidden-replies fetch in parallel
-      return p.then((res) => mergeIntoTweetDetail(res, rootId)).catch(() => p);
+      return p.then((res) => mergeIntoTweetDetail(res, rootId, { loadMoreHidden: !!vars.cursor })).catch(() => p);
     }).catch(() => p);
   };
 
@@ -414,8 +423,9 @@
   function buildFeatures() { const o = Object.assign({}, state.featuresObj || {}); for (const k of MODERATED_FEATURES) if (!(k in o)) o[k] = !FEATURE_DEFAULT_FALSE.has(k); return o; }
   function buildFieldToggles() { const o = Object.assign({}, state.fieldTogglesObj || {}); for (const k of MODERATED_FIELD_TOGGLES) if (!(k in o)) o[k] = false; return o; }
 
-  async function doFetch(queryId, rootId) {
+  async function doFetch(queryId, rootId, cursor) {
     const variables = { rootTweetId: String(rootId), count: 40, includePromotedContent: false };
+    if (cursor) variables.cursor = String(cursor);
     const origin = state.graphqlOrigin || location.origin;
     const prefix = state.graphqlPrefix || '/graphql';
     const url = origin + prefix + '/' + queryId + '/ModeratedTimeline' +
@@ -431,16 +441,6 @@
     const res = await origFetch(url, { method: 'GET', headers, credentials: 'include', referrer: location.href });
     let json = null; try { json = await res.clone().json(); } catch (_) { /* ignore */ }
     return { res, json };
-  }
-
-  function getModerated(rootId) {
-    if (!moderatedPromises.has(rootId)) {
-      moderatedPromises.set(rootId, fetchModerated(rootId).then((result) => {
-        moderatedResults.set(String(rootId), result);
-        return result;
-      }));
-    }
-    return moderatedPromises.get(rootId);
   }
 
   function rememberHiddenThreadReplies(nestedByParent) {
@@ -496,6 +496,89 @@
     });
   }
 
+  function mergeModeratedPage(base, page) {
+    if (!base || !base.ok) return page;
+    if (!page || !page.ok) return base;
+
+    const results = base.results ? base.results.slice() : [];
+    const ids = base.ids ? base.ids.slice() : [];
+    const seenResults = new Set(results.map(resId).filter(Boolean).map(String));
+    const seenIds = new Set(ids.map(String));
+
+    for (const res of page.results || []) {
+      const id = resId(res);
+      if (!id || seenResults.has(String(id))) continue;
+      seenResults.add(String(id));
+      results.push(res);
+    }
+    for (const id of page.ids || []) {
+      if (!id || seenIds.has(String(id))) continue;
+      seenIds.add(String(id));
+      ids.push(String(id));
+    }
+
+    const seenCursors = base.seenCursors || new Set();
+    if (page.loadedCursor) seenCursors.add(String(page.loadedCursor));
+    return Object.assign({}, base, {
+      results: results,
+      ids: ids,
+      nextCursor: page.nextCursor || null,
+      done: !page.nextCursor,
+      pagesLoaded: (base.pagesLoaded || 1) + 1,
+      threadReplyCount: (base.threadReplyCount || 0) + (page.threadReplyCount || 0),
+      threadReplyIds: (base.threadReplyIds || []).concat(page.threadReplyIds || []),
+      seenCursors: seenCursors
+    });
+  }
+
+  function timelineCursorValue(content, expectedType) {
+    if (!content || typeof content !== 'object') return null;
+    const typename = content.__typename || content.entryType || content.itemType;
+    if (typename !== 'TimelineTimelineCursor') return null;
+    const cursorType = content.cursorType || content.cursor_type;
+    if (String(cursorType) !== expectedType) return null;
+    const value = content.value || content.cursorValue || content.cursor_value;
+    return value ? String(value) : null;
+  }
+
+  function extractNextPageCursor(json) {
+    const stack = [json];
+    let guard = 0;
+    while (stack.length && guard++ < 300000) {
+      const n = stack.pop();
+      if (!n || typeof n !== 'object') continue;
+      if (Array.isArray(n)) {
+        for (const v of n) stack.push(v);
+        continue;
+      }
+
+      if (Array.isArray(n.entries)) {
+        for (const entry of n.entries) {
+          const direct = timelineCursorValue(entry && entry.content, 'Bottom');
+          if (direct) return direct;
+          const items = entry && entry.content && (entry.content.items || (entry.content.content && entry.content.content.items));
+          if (Array.isArray(items)) {
+            for (const item of items) {
+              const itemCursor = timelineCursorValue(item && (item.item || item.itemContent), 'Bottom');
+              if (itemCursor) return itemCursor;
+            }
+          }
+        }
+      }
+
+      if (n.entry) {
+        const direct = timelineCursorValue(n.entry.content, 'Bottom');
+        if (direct) return direct;
+      }
+
+      for (const k in n) {
+        const v = n[k];
+        if (v && typeof v === 'object') stack.push(v);
+      }
+    }
+    return null;
+  }
+
   function findTweetResult(json, tweetId) {
     const target = String(tweetId);
     const stack = [json];
@@ -535,19 +618,64 @@
     return mod;
   }
 
-  async function fetchModerated(rootId) {
+  function getModerated(rootId) {
+    const key = String(rootId);
+    if (moderatedResults.has(key) && !moderatedMorePromises.has(key)) {
+      return Promise.resolve(moderatedResults.get(key));
+    }
+    if (!moderatedPromises.has(key)) {
+      moderatedPromises.set(key, fetchModerated(rootId, null).then((result) => {
+        moderatedResults.set(key, result);
+        return result;
+      }));
+    }
+    return moderatedPromises.get(key);
+  }
+
+  async function loadMoreModerated(rootId) {
+    const key = String(rootId);
+    const current = await getModerated(key);
+    if (!current || !current.ok || current.done || !current.nextCursor) return current;
+    if (current.seenCursors && current.seenCursors.has(String(current.nextCursor))) {
+      current.done = true;
+      current.nextCursor = null;
+      return current;
+    }
+    if (moderatedMorePromises.has(key)) return moderatedMorePromises.get(key);
+
+    const cursor = current.nextCursor;
+    const p = fetchModerated(key, cursor).then((page) => {
+      const latest = moderatedResults.get(key) || current;
+      const merged = mergeModeratedPage(latest, page);
+      moderatedResults.set(key, merged);
+      debugTweet(key, {
+        moderatedPagesLoaded: merged.pagesLoaded || 1,
+        moderatedNextCursor: merged.nextCursor || null,
+        moderatedTotalIds: merged.ids ? merged.ids.length : 0,
+        moderatedTotalResults: merged.results ? merged.results.length : 0
+      });
+      return merged;
+    }).finally(() => {
+      moderatedMorePromises.delete(key);
+    });
+    moderatedMorePromises.set(key, p);
+    return p;
+  }
+
+  async function fetchModerated(rootId, cursor) {
     let queryId = await resolveQueryId(false);
     if (!queryId) return { ok: false, error: 'NO_QUERY_ID' };
     try {
-      let r = await doFetch(queryId, rootId);
-      if (r.res.status === 404) { const fresh = await resolveQueryId(true); if (fresh && fresh !== queryId) { queryId = fresh; r = await doFetch(queryId, rootId); } }
-      debugTweet(rootId, { moderatedQueryId: queryId, moderatedStatus: r.res.status, moderatedHasJson: !!r.json });
+      let r = await doFetch(queryId, rootId, cursor);
+      if (r.res.status === 404) { const fresh = await resolveQueryId(true); if (fresh && fresh !== queryId) { queryId = fresh; r = await doFetch(queryId, rootId, cursor); } }
+      debugTweet(rootId, { moderatedQueryId: queryId, moderatedStatus: r.res.status, moderatedHasJson: !!r.json, moderatedCursor: cursor || null });
       if (!r.res.ok || !r.json) return { ok: false, error: 'HTTP_' + r.res.status, status: r.res.status };
       if (r.json.errors && !r.json.data) {
         debugTweet(rootId, { moderatedError: 'GRAPHQL_ERROR', moderatedBody: r.json.errors });
         return { ok: false, error: 'GRAPHQL_ERROR', body: r.json.errors };
       }
       const out = extractResults(r.json, rootId);
+      const nextCursor = extractNextPageCursor(r.json);
       rememberHiddenThreadReplies(out.nestedByParent);
       const merged = addCachedThreadReplies(rootId, out.results, out.ids);
       debugTweet(rootId, {
@@ -555,10 +683,24 @@
         moderatedFilteredNested: out.filteredNested || 0,
         moderatedCachedThreadReplies: merged.added,
         moderatedCachedThreadReplyIds: merged.addedIds,
-        moderatedIds: merged.ids.slice()
+        moderatedIds: merged.ids.slice(),
+        moderatedNextCursor: nextCursor || null
       });
-      console.log(TAG, 'ModeratedTimeline returned ' + out.results.length + ' hidden repl' + (out.results.length === 1 ? 'y' : 'ies') + ' and ' + merged.added + ' cached thread repl' + (merged.added === 1 ? 'y' : 'ies') + ' for', rootId);
-      return { ok: true, results: merged.results, ids: merged.ids, threadReplyCount: merged.added };
+      console.log(TAG, 'ModeratedTimeline returned ' + out.results.length + ' hidden repl' + (out.results.length === 1 ? 'y' : 'ies') + ' and ' + merged.added + ' cached thread repl' + (merged.added === 1 ? 'y' : 'ies') + ' for', rootId, cursor ? '(next page)' : '(first page)');
+      const seenCursors = new Set();
+      if (cursor) seenCursors.add(String(cursor));
+      return {
+        ok: true,
+        results: merged.results,
+        ids: merged.ids,
+        threadReplyCount: merged.added,
+        threadReplyIds: merged.addedIds,
+        nextCursor: nextCursor || null,
+        done: !nextCursor,
+        pagesLoaded: 1,
+        loadedCursor: cursor || null,
+        seenCursors: seenCursors
+      };
     } catch (e) {
       debugTweet(rootId, { moderatedError: 'FETCH_FAILED', moderatedDetail: String((e && e.message) || e) });
       return { ok: false, error: 'FETCH_FAILED', detail: String((e && e.message) || e) };
@@ -582,7 +724,7 @@
     if (!d || d.source !== 'HRX_CS') return;
 
     if (d.type === 'HRX_READY') {
-      if (d.tweetId) {
+      if (d.tweetId && !isHiddenRepliesPage()) {
         getModerated(String(d.tweetId));
         postHiddenIds(d.tweetId);
       }
@@ -1115,10 +1257,11 @@
     return true;
   }
 
-  async function mergeIntoTweetDetail(res, rootId) {
+  async function mergeIntoTweetDetail(res, rootId, options) {
     try {
       const json = await res.clone().json();
       let mod = await getModerated(rootId);
+      if (options && options.loadMoreHidden) mod = await loadMoreModerated(rootId);
       mod = await recoverHiddenThreadRepliesFromParent(json, rootId, mod);
       if (!applyHiddenToTweetDetailJson(json, rootId, mod)) return res;
       const h = new Headers(res.headers); h.delete('content-length'); h.delete('content-encoding'); h.set('content-type', 'application/json; charset=utf-8');
