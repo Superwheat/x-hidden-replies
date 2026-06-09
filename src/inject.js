@@ -618,10 +618,22 @@
     return mod;
   }
 
+  function isCooledDownTransientFailure(result) {
+    return !!result && result.ok === false && result.retryable === true &&
+      (!result.retryAt || Date.now() >= result.retryAt);
+  }
+
   function getModerated(rootId) {
     const key = String(rootId);
-    if (moderatedResults.has(key) && !moderatedMorePromises.has(key)) {
-      return Promise.resolve(moderatedResults.get(key));
+    const cached = moderatedResults.get(key);
+    if (cached && !moderatedMorePromises.has(key)) {
+      // Successful (or permanently-failed) results stay cached for the session so
+      // a tweet is fetched at most once. A transient failure (network blip, 429,
+      // 5xx) is only re-fetched once its cooldown has elapsed — and only when a
+      // later user-driven TweetDetail calls back in, never on a timer.
+      if (!isCooledDownTransientFailure(cached)) return Promise.resolve(cached);
+      moderatedPromises.delete(key);
+      moderatedResults.delete(key);
     }
     if (!moderatedPromises.has(key)) {
       moderatedPromises.set(key, fetchModerated(rootId, null).then((result) => {
@@ -662,14 +674,42 @@
     return p;
   }
 
+  // Transient failures shouldn't kill the feature for the rest of the SPA
+  // session, but we also must not hammer X. Cache the failure with a cooldown
+  // and honor Retry-After so a later user-driven TweetDetail can retry politely.
+  const RETRY_COOLDOWN_MS = 30000;
+  const MAX_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
+
+  function parseRetryAfterMs(res) {
+    try {
+      const h = res && res.headers && res.headers.get('retry-after');
+      if (!h) return 0;
+      const s = String(h).trim();
+      if (/^\d+$/.test(s)) return Math.min(MAX_RETRY_COOLDOWN_MS, parseInt(s, 10) * 1000);
+      const when = Date.parse(s);
+      if (!isNaN(when)) return Math.min(MAX_RETRY_COOLDOWN_MS, Math.max(0, when - Date.now()));
+    } catch (_) { /* ignore */ }
+    return 0;
+  }
+
+  function transientFailure(error, extra) {
+    return Object.assign({ ok: false, error: error, retryable: true, retryAt: Date.now() + RETRY_COOLDOWN_MS }, extra || {});
+  }
+
   async function fetchModerated(rootId, cursor) {
     let queryId = await resolveQueryId(false);
-    if (!queryId) return { ok: false, error: 'NO_QUERY_ID' };
+    if (!queryId) return transientFailure('NO_QUERY_ID');
     try {
       let r = await doFetch(queryId, rootId, cursor);
       if (r.res.status === 404) { const fresh = await resolveQueryId(true); if (fresh && fresh !== queryId) { queryId = fresh; r = await doFetch(queryId, rootId, cursor); } }
       debugTweet(rootId, { moderatedQueryId: queryId, moderatedStatus: r.res.status, moderatedHasJson: !!r.json, moderatedCursor: cursor || null });
-      if (!r.res.ok || !r.json) return { ok: false, error: 'HTTP_' + r.res.status, status: r.res.status };
+      if (!r.res.ok || !r.json) {
+        const status = r.res.status;
+        const retryable = status === 429 || status === 0 || status >= 500;
+        const retryAt = retryable ? Date.now() + (parseRetryAfterMs(r.res) || RETRY_COOLDOWN_MS) : 0;
+        if (status === 429) console.warn(TAG, 'rate limited by X (HTTP 429); backing off for', Math.round((retryAt - Date.now()) / 1000) + 's');
+        return { ok: false, error: 'HTTP_' + status, status: status, retryable: retryable, retryAt: retryAt };
+      }
       if (r.json.errors && !r.json.data) {
         debugTweet(rootId, { moderatedError: 'GRAPHQL_ERROR', moderatedBody: r.json.errors });
         return { ok: false, error: 'GRAPHQL_ERROR', body: r.json.errors };
@@ -703,7 +743,7 @@
       };
     } catch (e) {
       debugTweet(rootId, { moderatedError: 'FETCH_FAILED', moderatedDetail: String((e && e.message) || e) });
-      return { ok: false, error: 'FETCH_FAILED', detail: String((e && e.message) || e) };
+      return transientFailure('FETCH_FAILED', { detail: String((e && e.message) || e) });
     }
   }
 
