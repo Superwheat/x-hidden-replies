@@ -13,7 +13,7 @@
   const hiddenByTweet = new Map(); // root tweet id -> Set(hidden reply ids)
   const renderWarnTimers = new Map();
   let lastTweetId = null;
-  let debounceTimer = null;
+  let scheduledFrame = null;
   let markLoggedFor = null;
 
   function currentTweetId() {
@@ -87,9 +87,13 @@
     return marked;
   }
 
+  // Coalesce mutation bursts to one run per frame instead of debouncing: a
+  // resetting timer keeps getting pushed back while X re-renders the timeline
+  // (e.g. navigating back to a tweet), which delays the highlight.
   function schedule() {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
+    if (scheduledFrame !== null) return;
+    scheduledFrame = requestAnimationFrame(() => {
+      scheduledFrame = null;
       const id = currentTweetId();
       if (isHiddenRepliesPage()) {
         lastTweetId = null;
@@ -104,7 +108,7 @@
         window.postMessage({ source: 'HRX_CS', type: 'HRX_READY', tweetId: id }, location.origin);
       }
       if (id) markHiddenReplies(id);
-    }, 250);
+    });
   }
 
   window.addEventListener('message', (ev) => {
