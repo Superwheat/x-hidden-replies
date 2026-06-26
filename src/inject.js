@@ -72,6 +72,8 @@
       ModeratedTimeline: FALLBACK_QUERY_ID,
       TweetDetail: FALLBACK_TWEET_DETAIL_QUERY_ID
     }),
+    replayHeaders: Object.create(null),
+    operationHeaders: Object.create(null),
     featuresObj: null,
     fieldTogglesObj: null,
     graphqlOrigin: null,
@@ -118,11 +120,17 @@
     return m ? decodeURIComponent(m[1]) : '';
   }
 
+  function graphqlPathParts(pathname) {
+    const p = String(pathname || '');
+    return p.match(/^\/i\/api\/graphql\/([^/?#]+)(?:\/([^/?#]+))?/) ||
+      p.match(/^\/graphql\/([^/?#]+)(?:\/([^/?#]+))?/);
+  }
+
   function rememberFromUrl(rawUrl) {
     try {
       if (!mightBeGraphqlUrl(rawUrl)) return;
       const u = new URL(rawUrl, location.origin);
-      const m = u.pathname.match(/(?:^|\/)(?:i\/api\/)?graphql\/([^/?#]+)(?:\/([^/?#]+))?/);
+      const m = graphqlPathParts(u.pathname);
       if (!m) return;
       const opName = m[2] ? decodeURIComponent(m[2]) : null;
       if (opName) state.ops[opName] = m[1];
@@ -140,14 +148,19 @@
   }
 
   function mightBeGraphqlUrl(rawUrl) {
-    return /(?:^|\/)(?:i\/api\/)?graphql(?:\/|$|\?)/i.test(String(rawUrl || ''));
+    try {
+      const u = new URL(rawUrl, location.origin);
+      return !!graphqlPathParts(u.pathname);
+    } catch (_) {
+      return false;
+    }
   }
 
   function graphqlInfo(rawUrl) {
     try {
       if (!mightBeGraphqlUrl(rawUrl)) return null;
       const u = new URL(rawUrl, location.origin);
-      const m = u.pathname.match(/(?:^|\/)(?:i\/api\/)?graphql\/([^/?#]+)(?:\/([^/?#]+))?/);
+      const m = graphqlPathParts(u.pathname);
       if (!m) return null;
       return { url: u, queryId: m[1], operationName: m[2] ? decodeURIComponent(m[2]) : null };
     } catch (_) {
@@ -165,17 +178,102 @@
     return null;
   }
 
-  function rememberHeaders(headers) {
+  const HEADER_REPLAY_BLOCKLIST = new Set([
+    'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+    'connection', 'content-length', 'cookie', 'date', 'expect', 'host',
+    'keep-alive', 'origin', 'referer', 'referrer', 'te', 'trailer',
+    'transfer-encoding', 'upgrade', 'user-agent', 'via'
+  ]);
+  const OPERATION_BOUND_HEADERS = new Set(['x-client-transaction-id']);
+
+  function canReplayHeader(name) {
+    const n = String(name || '').trim().toLowerCase();
+    return !!n && !HEADER_REPLAY_BLOCKLIST.has(n) &&
+      n.indexOf('proxy-') !== 0 &&
+      n.indexOf('sec-') !== 0;
+  }
+
+  function forEachHeader(headers, cb) {
+    if (!headers) return;
+    if (typeof headers.forEach === 'function') {
+      headers.forEach((value, key) => cb(key, value));
+      return;
+    }
+    if (Array.isArray(headers)) {
+      for (const pair of headers) if (pair && pair.length >= 2) cb(pair[0], pair[1]);
+      return;
+    }
+    for (const key of Object.keys(headers)) cb(key, headers[key]);
+  }
+
+  function collectReplayHeaders(headers) {
+    const out = Object.create(null);
     try {
-      if (!headers) return;
-      const read = (k) => {
-        if (typeof headers.get === 'function') return headers.get(k);
-        if (Array.isArray(headers)) { const e = headers.find((p) => String(p[0]).toLowerCase() === k); return e ? e[1] : null; }
-        const kk = Object.keys(headers).find((x) => x.toLowerCase() === k); return kk ? headers[kk] : null;
-      };
-      const auth = read('authorization'); if (auth) state.bearer = auth;
-      const lang = read('x-twitter-client-language'); if (lang) state.lang = lang;
+      forEachHeader(headers, (key, value) => {
+        const name = String(key || '').trim().toLowerCase();
+        if (!canReplayHeader(name) || value == null) return;
+        out[name] = String(value);
+      });
     } catch (_) { /* ignore */ }
+    return out;
+  }
+
+  function publicHeaderNames(headers) {
+    return Object.keys(headers || {}).sort();
+  }
+
+  function rememberHeaders(headers, operationName) {
+    try {
+      const captured = collectReplayHeaders(headers);
+      const names = Object.keys(captured);
+      if (!names.length) return;
+
+      Object.assign(state.replayHeaders, captured);
+      if (operationName) {
+        if (!state.operationHeaders[operationName]) state.operationHeaders[operationName] = Object.create(null);
+        Object.assign(state.operationHeaders[operationName], captured);
+      }
+
+      const auth = captured.authorization; if (auth) state.bearer = auth;
+      const lang = captured['x-twitter-client-language']; if (lang) state.lang = lang;
+      debugState.headerCapture = {
+        hasBearer: !!state.bearer,
+        hasCt0: !!getCookie('ct0'),
+        lastOperation: operationName || null,
+        genericHeaderNames: publicHeaderNames(state.replayHeaders),
+        tweetDetailHeaderNames: publicHeaderNames(state.operationHeaders.TweetDetail)
+      };
+    } catch (_) { /* ignore */ }
+  }
+
+  function hasCapturedAuthHeaders() {
+    return !!(state.bearer ||
+      (state.replayHeaders && state.replayHeaders.authorization) ||
+      (state.operationHeaders.TweetDetail && state.operationHeaders.TweetDetail.authorization) ||
+      (state.operationHeaders.ModeratedTimeline && state.operationHeaders.ModeratedTimeline.authorization));
+  }
+
+  function copyReplayHeaders(target, source, allowOperationBound) {
+    if (!source) return target;
+    for (const key of Object.keys(source)) {
+      if (!allowOperationBound && OPERATION_BOUND_HEADERS.has(key)) continue;
+      target[key] = source[key];
+    }
+    return target;
+  }
+
+  function buildModeratedHeaders() {
+    const headers = {};
+    copyReplayHeaders(headers, state.replayHeaders, false);
+    copyReplayHeaders(headers, state.operationHeaders.TweetDetail, false);
+    copyReplayHeaders(headers, state.operationHeaders.ModeratedTimeline, true);
+    headers.authorization = state.bearer || headers.authorization || FALLBACK_BEARER;
+    headers['x-twitter-active-user'] = headers['x-twitter-active-user'] || 'yes';
+    headers['x-twitter-auth-type'] = headers['x-twitter-auth-type'] || 'OAuth2Session';
+    headers['x-twitter-client-language'] = headers['x-twitter-client-language'] || state.lang || 'en';
+    headers['x-csrf-token'] = getCookie('ct0') || headers['x-csrf-token'] || '';
+    headers['content-type'] = headers['content-type'] || 'application/json';
+    return headers;
   }
 
   function varsFromUrl(url) {
@@ -278,41 +376,71 @@
     return true;
   }
 
+  function rewriteXhrTweetDetail(xhr) {
+    const ctx = xhr && xhr.__hrxTweetDetailContext;
+    if (!ctx || xhr.readyState !== 4 || xhr.__hrxResponseText != null) return false;
+    const mod = modWithCachedThreadReplies(ctx.rootId, moderatedResults.get(ctx.rootId));
+    if (!mod) {
+      debugTweet(ctx.rootId, { xhrRewriteSkipped: 'MODERATED_NOT_READY' });
+      return false;
+    }
+    try {
+      const text = XHRresponseText && XHRresponseText.get ? XHRresponseText.get.call(xhr) : xhr.responseText;
+      if (!text) return false;
+      const json = JSON.parse(text);
+      if (!applyHiddenToTweetDetailJson(json, ctx.rootId, mod)) return false;
+      xhr.__hrxResponseJson = json;
+      xhr.__hrxResponseText = JSON.stringify(json);
+      debugTweet(ctx.rootId, { xhrResponseRewritten: true });
+      return true;
+    } catch (e) {
+      debugTweet(ctx.rootId, { xhrRewriteError: String((e && e.message) || e) });
+      return false;
+    }
+  }
+
   function setupXhrTweetDetailMerge(xhr, rawUrl, vars) {
-    if (!vars || !vars.focalTweetId || xhr.__hrxTweetDetailMergeInstalled || isHiddenRepliesPage()) return;
-    xhr.__hrxTweetDetailMergeInstalled = true;
+    if (!vars || !vars.focalTweetId || isHiddenRepliesPage()) return;
     const rootId = String(vars.focalTweetId);
-    debugTweet(rootId, { tweetDetailIntercepted: true, tweetDetailTransport: 'xhr', tweetDetailCursor: !!vars.cursor, tweetDetailUrl: rawUrl, tweetDetailVarsSource: varsFromUrl(rawUrl) ? 'url' : 'body', interceptedAt: Date.now() });
-    getModerated(rootId).then(() => {
-      if (vars.cursor) return loadMoreModerated(rootId);
-      return moderatedResults.get(rootId);
-    }).catch(() => { /* ignore */ });
+    xhr.__hrxTweetDetailContext = {
+      rootId: rootId,
+      rawUrl: rawUrl,
+      vars: vars,
+      varsSource: varsFromUrl(rawUrl) ? 'url' : 'body'
+    };
+    if (xhr.__hrxTweetDetailMergeInstalled) return;
+    xhr.__hrxTweetDetailMergeInstalled = true;
     installXhrResponseOverride(xhr);
 
     const rewrite = function () {
-      if (xhr.readyState !== 4 || xhr.__hrxResponseText != null) return;
-      const mod = modWithCachedThreadReplies(rootId, moderatedResults.get(rootId));
-      if (!mod) {
-        debugTweet(rootId, { xhrRewriteSkipped: 'MODERATED_NOT_READY' });
-        return;
-      }
-      try {
-        const text = XHRresponseText && XHRresponseText.get ? XHRresponseText.get.call(xhr) : xhr.responseText;
-        if (!text) return;
-        const json = JSON.parse(text);
-        if (!applyHiddenToTweetDetailJson(json, rootId, mod)) return;
-        xhr.__hrxResponseJson = json;
-        xhr.__hrxResponseText = JSON.stringify(json);
-        debugTweet(rootId, { xhrResponseRewritten: true });
-      } catch (e) {
-        debugTweet(rootId, { xhrRewriteError: String((e && e.message) || e) });
-      }
+      rewriteXhrTweetDetail(xhr);
     };
 
     try {
       xhr.addEventListener('readystatechange', rewrite, true);
       xhr.addEventListener('load', rewrite, true);
     } catch (_) { /* ignore */ }
+  }
+
+  function startXhrTweetDetailMerge(xhr, rawUrl, vars) {
+    setupXhrTweetDetailMerge(xhr, rawUrl, vars);
+    const ctx = xhr && xhr.__hrxTweetDetailContext;
+    if (!ctx || ctx.started) return;
+    ctx.started = true;
+    debugTweet(ctx.rootId, {
+      tweetDetailIntercepted: true,
+      tweetDetailTransport: 'xhr',
+      tweetDetailCursor: !!ctx.vars.cursor,
+      tweetDetailUrl: ctx.rawUrl,
+      tweetDetailVarsSource: ctx.varsSource,
+      interceptedAt: Date.now()
+    });
+    getModerated(ctx.rootId).then(() => {
+      if (ctx.vars.cursor) return loadMoreModerated(ctx.rootId);
+      return moderatedResults.get(ctx.rootId);
+    }).then(() => {
+      rewriteXhrTweetDetail(xhr);
+    }).catch(() => { /* ignore */ });
   }
 
   // --- intercept GraphQL: passive capture + TweetDetail response merge --------
@@ -322,18 +450,20 @@
     let requestClone = null;
     try { if (typeof Request !== 'undefined' && input instanceof Request) requestClone = input.clone(); } catch (_) { /* ignore */ }
     const gql = url ? graphqlInfo(url) : null;
+    const requestHeaders = (init && init.headers) || (input && input.headers);
     if (url && mightBeGraphqlUrl(url)) {
       pushDebugList('fetchSeen', { url: String(url).slice(0, 300), matchedGraphql: !!gql }, 50);
     }
     if (gql) {
       rememberFromUrl(url);
-      rememberHeaders((init && init.headers) || (input && input.headers));
+      rememberHeaders(requestHeaders);
     }
     const p = origFetch.apply(this, arguments);
     if (!gql) return p;
 
     return Promise.resolve(tdVars(input, init, url, requestClone)).then((vars) => {
       const operationName = operationNameFor(gql, vars);
+      rememberHeaders(requestHeaders, operationName);
       debugGraphql(gql, operationName);
       if (operationName !== 'TweetDetail') return p;
       if (isHiddenRepliesPage()) return p;
@@ -348,8 +478,7 @@
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__hrxUrl = url;
     this.__hrxMethod = method;
-    let setupVars = null;
-    let setupRawUrl = null;
+    this.__hrxRequestHeaders = Object.create(null);
     try {
       const rawUrl = String(url || '');
       const gql = graphqlInfo(rawUrl);
@@ -357,22 +486,19 @@
       if (mightBeGraphqlUrl(rawUrl)) {
         pushDebugList('xhrSeen', { phase: 'open', method: String(method || 'GET'), url: rawUrl.slice(0, 300), matchedGraphql: !!gql }, 50);
       }
-      if (operationNameFor(gql, vars) === 'TweetDetail') {
-        setupRawUrl = rawUrl;
-        setupVars = vars;
-      }
+      if (operationNameFor(gql, vars) === 'TweetDetail') setupXhrTweetDetailMerge(this, rawUrl, vars);
     } catch (_) { /* ignore */ }
     if (url && graphqlInfo(String(url))) rememberFromUrl(String(url));
     const ret = XHRopen.apply(this, arguments);
-    if (setupVars) setupXhrTweetDetailMerge(this, setupRawUrl, setupVars);
     return ret;
   };
   XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
     try {
       if (this.__hrxUrl && graphqlInfo(String(this.__hrxUrl))) {
-        const kl = String(k).toLowerCase();
-        if (kl === 'authorization') state.bearer = v;
-        else if (kl === 'x-twitter-client-language') state.lang = v;
+        if (!this.__hrxRequestHeaders) this.__hrxRequestHeaders = Object.create(null);
+        this.__hrxRequestHeaders[String(k).toLowerCase()] = v;
+        const info = graphqlInfo(String(this.__hrxUrl));
+        rememberHeaders(this.__hrxRequestHeaders, operationNameFor(info, varsFromUrl(String(this.__hrxUrl))));
       }
     } catch (_) { /* ignore */ }
     return XHRsetHeader.apply(this, arguments);
@@ -382,9 +508,14 @@
       const rawUrl = String(this.__hrxUrl || '');
       const gql = rawUrl ? graphqlInfo(rawUrl) : null;
       if (mightBeGraphqlUrl(rawUrl)) {
+        const urlVars = varsFromUrl(rawUrl);
+        const urlOperationName = operationNameFor(gql, urlVars);
+        rememberHeaders(this.__hrxRequestHeaders, urlOperationName);
+        if (urlOperationName === 'TweetDetail') startXhrTweetDetailMerge(this, rawUrl, urlVars);
         Promise.resolve(varsFromBody(body)).then((vars) => {
           vars = varsFromUrl(rawUrl) || vars;
           const operationName = operationNameFor(gql, vars);
+          rememberHeaders(this.__hrxRequestHeaders, operationName);
           pushDebugList('xhrSeen', {
             phase: 'send',
             method: String(this.__hrxMethod || 'GET'),
@@ -395,7 +526,7 @@
             hasRootTweetId: !!(vars && vars.rootTweetId)
           }, 50);
           if (gql) debugGraphql(gql, operationName);
-          if (operationName === 'TweetDetail') setupXhrTweetDetailMerge(this, rawUrl, vars);
+          if (operationName === 'TweetDetail') startXhrTweetDetailMerge(this, rawUrl, vars);
         }).catch(() => { /* ignore */ });
       }
     } catch (_) { /* ignore */ }
@@ -432,12 +563,8 @@
       '?variables=' + encodeURIComponent(JSON.stringify(variables)) +
       '&features=' + encodeURIComponent(JSON.stringify(buildFeatures())) +
       '&fieldToggles=' + encodeURIComponent(JSON.stringify(buildFieldToggles()));
-    const headers = {
-      authorization: state.bearer || FALLBACK_BEARER,
-      'x-twitter-active-user': 'yes', 'x-twitter-auth-type': 'OAuth2Session',
-      'x-twitter-client-language': state.lang || 'en', 'x-csrf-token': getCookie('ct0'),
-      'content-type': 'application/json'
-    };
+    const headers = buildModeratedHeaders();
+    debugTweet(rootId, { moderatedHeaderNames: publicHeaderNames(headers), moderatedHasCapturedAuth: hasCapturedAuthHeaders() });
     const res = await origFetch(url, { method: 'GET', headers, credentials: 'include', referrer: location.href });
     let json = null; try { json = await res.clone().json(); } catch (_) { /* ignore */ }
     return { res, json };
@@ -534,9 +661,13 @@
   function timelineCursorValue(content, expectedType) {
     if (!content || typeof content !== 'object') return null;
     const typename = content.__typename || content.entryType || content.itemType;
-    if (typename !== 'TimelineTimelineCursor') return null;
+    if (typename !== 'TimelineTimelineCursor' && !content.cursorType && !content.cursor_type) {
+      return timelineCursorValue(content.itemContent, expectedType) ||
+        timelineCursorValue(content.content, expectedType) ||
+        timelineCursorValue(content.item, expectedType);
+    }
     const cursorType = content.cursorType || content.cursor_type;
-    if (String(cursorType) !== expectedType) return null;
+    if (String(cursorType || '').toLowerCase() !== String(expectedType || '').toLowerCase()) return null;
     const value = content.value || content.cursorValue || content.cursor_value;
     return value ? String(value) : null;
   }
@@ -551,6 +682,9 @@
         for (const v of n) stack.push(v);
         continue;
       }
+
+      const cursor = timelineCursorValue(n, 'Bottom');
+      if (cursor) return cursor;
 
       if (Array.isArray(n.entries)) {
         for (const entry of n.entries) {
@@ -619,8 +753,32 @@
   }
 
   function isCooledDownTransientFailure(result) {
+    if (result && result.error === 'AUTH_NOT_READY' && hasCapturedAuthHeaders() && getCookie('ct0')) return true;
     return !!result && result.ok === false && result.retryable === true &&
       (!result.retryAt || Date.now() >= result.retryAt);
+  }
+
+  const MAX_INITIAL_MODERATED_PAGES = 5;
+
+  async function fetchInitialModerated(rootId) {
+    let result = await fetchModerated(rootId, null);
+    let pages = 1;
+    while (result && result.ok && result.nextCursor && pages < MAX_INITIAL_MODERATED_PAGES) {
+      if (result.seenCursors && result.seenCursors.has(String(result.nextCursor))) break;
+      const page = await fetchModerated(rootId, result.nextCursor);
+      if (!page || !page.ok) break;
+      result = mergeModeratedPage(result, page);
+      pages++;
+    }
+    if (result && result.ok) {
+      debugTweet(rootId, {
+        moderatedPagesLoaded: result.pagesLoaded || pages,
+        moderatedNextCursor: result.nextCursor || null,
+        moderatedTotalIds: result.ids ? result.ids.length : 0,
+        moderatedTotalResults: result.results ? result.results.length : 0
+      });
+    }
+    return result;
   }
 
   function getModerated(rootId) {
@@ -636,7 +794,7 @@
       moderatedResults.delete(key);
     }
     if (!moderatedPromises.has(key)) {
-      moderatedPromises.set(key, fetchModerated(rootId, null).then((result) => {
+      moderatedPromises.set(key, fetchInitialModerated(rootId).then((result) => {
         moderatedResults.set(key, result);
         return result;
       }));
@@ -699,13 +857,24 @@
   async function fetchModerated(rootId, cursor) {
     let queryId = await resolveQueryId(false);
     if (!queryId) return transientFailure('NO_QUERY_ID');
+    const authReady = hasCapturedAuthHeaders();
+    const csrfReady = !!getCookie('ct0');
+    if (!authReady || !csrfReady) {
+      debugTweet(rootId, {
+        moderatedError: 'AUTH_NOT_READY',
+        moderatedAuthReady: authReady,
+        moderatedCsrfReady: csrfReady,
+        moderatedCursor: cursor || null
+      });
+      return transientFailure('AUTH_NOT_READY', { authReady: authReady, csrfReady: csrfReady });
+    }
     try {
       let r = await doFetch(queryId, rootId, cursor);
       if (r.res.status === 404) { const fresh = await resolveQueryId(true); if (fresh && fresh !== queryId) { queryId = fresh; r = await doFetch(queryId, rootId, cursor); } }
       debugTweet(rootId, { moderatedQueryId: queryId, moderatedStatus: r.res.status, moderatedHasJson: !!r.json, moderatedCursor: cursor || null });
       if (!r.res.ok || !r.json) {
         const status = r.res.status;
-        const retryable = status === 429 || status === 0 || status >= 500;
+        const retryable = status === 401 || status === 429 || status === 0 || status >= 500;
         const retryAt = retryable ? Date.now() + (parseRetryAfterMs(r.res) || RETRY_COOLDOWN_MS) : 0;
         if (status === 429) console.warn(TAG, 'rate limited by X (HTTP 429); backing off for', Math.round((retryAt - Date.now()) / 1000) + 's');
         return { ok: false, error: 'HTTP_' + status, status: status, retryable: retryable, retryAt: retryAt };
@@ -765,7 +934,6 @@
 
     if (d.type === 'HRX_READY') {
       if (d.tweetId && !isHiddenRepliesPage()) {
-        getModerated(String(d.tweetId));
         postHiddenIds(d.tweetId);
       }
       return;
@@ -1273,7 +1441,7 @@
       const newIds = fresh.map(resId).filter(Boolean).map(String);
       if (!splitModuleWithHiddenItems(entries, moduleTemplate, fresh, rootId)) return false;
       debugTweet(rootId, { mergeMode: 'module-split-items', mergeFreshCount: fresh.length, mergeIds: newIds });
-      console.log(TAG, 'spaced ' + fresh.length + ' hidden repl' + (fresh.length === 1 ? 'y' : 'ies') + ' as native X reply module items');
+      console.log(TAG, 'spaced ' + fresh.length + ' hidden repl' + (fresh.length === 1 ? 'y' : 'ies') + ' as separate native X reply module items');
       return true;
     }
 
