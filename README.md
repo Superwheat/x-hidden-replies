@@ -4,6 +4,8 @@ A small browser extension that shows replies hidden by the author on X/Twitter.
 
 Hidden replies appear inline in the conversation with a subtle amber tint.
 
+![Preview of a revealed hidden reply](assets/preview.png)
+
 ## Install
 
 1. Download or clone this repository.

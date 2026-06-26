@@ -6,9 +6,9 @@
 
 [data-hrx-hidden-reply="true"] article {
   position: relative;
-  background: rgba(255, 173, 31, 0.16);
+  background: rgba(255, 173, 31, 0.11);
 }
 
 [data-hrx-hidden-reply="true"]:hover article {
-  background: rgba(255, 173, 31, 0.24);
+  background: rgba(255, 173, 31, 0.17);
 }
