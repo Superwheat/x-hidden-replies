@@ -11,7 +11,13 @@ Hidden replies appear inline in the conversation with a subtle amber tint.
 1. Download or clone this repository.
 2. Open `chrome://extensions` in Chrome, Edge, or Brave.
 3. Turn on **Developer mode**.
+
+![Developer mode enabled in Chrome extensions](assets/install-1-developer-mode.png)
+
 4. Click **Load unpacked**.
+
+![Load unpacked button in Chrome extensions](assets/install-2-load-unpacked.png)
+
 5. Select the `x-hidden-replies` folder.
 
 ## Use
