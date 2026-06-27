@@ -13,9 +13,6 @@
 
   const TAG = '[HiddenReplies/page]';
 
-  const FALLBACK_BEARER =
-    'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
-
   const FALLBACK_QUERY_ID = 'u74Eui5NKTnQmkd6RrLfuA';
   const FALLBACK_TWEET_DETAIL_QUERY_ID = 'RguQ9yvaXf-EETmDagsLzg';
 
@@ -267,7 +264,7 @@
     copyReplayHeaders(headers, state.replayHeaders, false);
     copyReplayHeaders(headers, state.operationHeaders.TweetDetail, false);
     copyReplayHeaders(headers, state.operationHeaders.ModeratedTimeline, true);
-    headers.authorization = state.bearer || headers.authorization || FALLBACK_BEARER;
+    if (state.bearer) headers.authorization = state.bearer;
     headers['x-twitter-active-user'] = headers['x-twitter-active-user'] || 'yes';
     headers['x-twitter-auth-type'] = headers['x-twitter-auth-type'] || 'OAuth2Session';
     headers['x-twitter-client-language'] = headers['x-twitter-client-language'] || state.lang || 'en';
