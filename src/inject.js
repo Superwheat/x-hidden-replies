@@ -1199,12 +1199,24 @@
     return null;
   }
 
+  function entryAnchorId(entry, rootId) {
+    const directId = itemContentId(itemContentFromEntry(entry));
+    if (directId && String(directId) !== String(rootId)) return String(directId);
+
+    const path = moduleItemsPath(entry);
+    const ids = path ? moduleItemIds(path.items) : [];
+    for (const id of ids) {
+      if (String(id) !== String(rootId)) return String(id);
+    }
+    return null;
+  }
+
   function replyEntryAnchors(entries, rootId) {
     const out = [];
     const focalIndex = findFocalEntryIndex(entries, rootId);
     for (let i = Math.max(0, focalIndex + 1); i < entries.length; i++) {
-      const id = itemContentId(itemContentFromEntry(entries[i]));
-      if (id && String(id) !== String(rootId)) out.push({ entry: entries[i], index: i, id: String(id) });
+      const id = entryAnchorId(entries[i], rootId);
+      if (id) out.push({ entry: entries[i], index: i, id: id });
     }
     return out;
   }
@@ -1436,16 +1448,23 @@
     });
     if (!fresh.length) return true;
 
+    const anchors = replyEntryAnchors(entries, rootId);
+    if (anchors.length) {
+      if (!insertStandaloneHiddenAfterAnchors(entries, anchors, fresh, rootId)) return false;
+      debugTweet(rootId, { mergeMode: 'entries-after-top-level-anchors', mergeFreshCount: fresh.length, mergeIds: fresh.map(resId).filter(Boolean).map(String) });
+      console.log(TAG, 'spaced ' + fresh.length + ' hidden repl' + (fresh.length === 1 ? 'y' : 'ies') + ' after top-level X reply entries');
+      return true;
+    }
+
     const moduleTemplate = findReplyModuleTemplate(entries, rootId);
     if (moduleTemplate) {
       const newIds = fresh.map(resId).filter(Boolean).map(String);
       if (!splitModuleWithHiddenItems(entries, moduleTemplate, fresh, rootId)) return false;
-      debugTweet(rootId, { mergeMode: 'module-split-items', mergeFreshCount: fresh.length, mergeIds: newIds });
+      debugTweet(rootId, { mergeMode: 'module-split-items-fallback', mergeFreshCount: fresh.length, mergeIds: newIds });
       console.log(TAG, 'spaced ' + fresh.length + ' hidden repl' + (fresh.length === 1 ? 'y' : 'ies') + ' as separate native X reply module items');
       return true;
     }
 
-    const anchors = replyEntryAnchors(entries, rootId);
     if (!anchors.length) {
       if (options && options.allowFocalFallback) {
         const focalIndex = findFocalEntryIndex(entries, rootId);
@@ -1459,10 +1478,6 @@
       console.log(TAG, 'hidden replies fetched; waiting for X to load real reply templates before splicing');
       return 'WAITING_FOR_REPLY_TEMPLATE';
     }
-    if (!insertStandaloneHiddenAfterAnchors(entries, anchors, fresh, rootId)) return false;
-    debugTweet(rootId, { mergeMode: 'entries-spaced', mergeFreshCount: fresh.length, mergeIds: fresh.map(resId).filter(Boolean).map(String) });
-    console.log(TAG, 'spaced ' + fresh.length + ' hidden repl' + (fresh.length === 1 ? 'y' : 'ies') + ' through the upper X timeline entries');
-    return true;
   }
 
   async function mergeIntoTweetDetail(res, rootId, options) {
