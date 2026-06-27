@@ -18,7 +18,7 @@ Hidden replies appear inline in the conversation with a subtle amber tint.
 
 ![Load unpacked button in Chrome extensions](assets/install-2-load-unpacked.png)
 
-5. Select the `x-hidden-replies` folder.
+5. Select the unarchived `x-hidden-replies` folder.
 
 ## Use
 
