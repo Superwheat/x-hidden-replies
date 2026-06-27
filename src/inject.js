@@ -1199,14 +1199,21 @@
     return null;
   }
 
-  function entryAnchorId(entry, rootId) {
+  function entryAnchor(entry, index, rootId) {
     const directId = itemContentId(itemContentFromEntry(entry));
-    if (directId && String(directId) !== String(rootId)) return String(directId);
+    if (directId && String(directId) !== String(rootId)) {
+      return { entry: entry, index: index, id: String(directId), moduleTemplate: null };
+    }
 
     const path = moduleItemsPath(entry);
-    const ids = path ? moduleItemIds(path.items) : [];
-    for (const id of ids) {
-      if (String(id) !== String(rootId)) return String(id);
+    const items = path && path.items;
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        const id = itemContentId(itemContentFromModuleItem(item));
+        if (id && String(id) !== String(rootId)) {
+          return { entry: entry, index: index, id: String(id), moduleTemplate: item };
+        }
+      }
     }
     return null;
   }
@@ -1215,8 +1222,8 @@
     const out = [];
     const focalIndex = findFocalEntryIndex(entries, rootId);
     for (let i = Math.max(0, focalIndex + 1); i < entries.length; i++) {
-      const id = entryAnchorId(entries[i], rootId);
-      if (id) out.push({ entry: entries[i], index: i, id: id });
+      const anchor = entryAnchor(entries[i], i, rootId);
+      if (anchor) out.push(anchor);
     }
     return out;
   }
@@ -1403,7 +1410,13 @@
     const groups = Array.from(byAnchor.values()).sort((a, b) => b.anchor.index - a.anchor.index);
     for (const group of groups) {
       const baseSort = group.anchor.entry.sortIndex;
-      const newEntries = group.results.map((res, i) => makeTimelineEntry(group.anchor.entry, res, baseSort, i + 1, rootId));
+      const newEntries = group.results.map((res, i) => {
+        if (group.anchor.moduleTemplate) {
+          return moduleSegment(group.anchor.entry, [makeModuleItem(group.anchor.moduleTemplate, res, rootId)], baseSort, i + 1, 'hidden-' + resId(res));
+        }
+        return makeTimelineEntry(group.anchor.entry, res, baseSort, i + 1, rootId);
+      });
+      if (newEntries.some((entry) => !entry)) return false;
       entries.splice(group.anchor.index + 1, 0, ...newEntries);
     }
     return true;
