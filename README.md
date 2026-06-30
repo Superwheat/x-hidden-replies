@@ -7,8 +7,6 @@ Hidden replies appear inline in the conversation with a subtle amber tint.
 ## Features
 
 - Reveals author-hidden replies inline in the normal X/Twitter conversation.
-- Preserves X's native reply cards instead of rendering custom tweet copies.
-- Marks revealed hidden replies with a subtle amber tint.
 - Lets you disable hidden-reply merging for your own posts or selected accounts.
 
 ## Preview
