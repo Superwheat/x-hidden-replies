@@ -1,0 +1,283 @@
+:root {
+  color-scheme: dark;
+  --popup-width: 365px;
+  --bg: #11151b;
+  --panel: #171c23;
+  --panel-2: #1d232c;
+  --text: #f3f4f6;
+  --muted: #9ca3af;
+  --line: #2c3440;
+  --accent: #1d9bf0;
+  --accent-2: #38bdf8;
+  --toggle-on: #1d9bf0;
+  --toggle-on-border: #75caff;
+  --danger: #f87171;
+  --popup-host-edge: 1px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  margin: 0;
+  padding: 0;
+  height: 0;
+  min-width: calc(var(--popup-width) + var(--popup-host-edge));
+  background: var(--bg);
+  overflow: visible;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  width: calc(var(--popup-width) + var(--popup-host-edge));
+  min-width: calc(var(--popup-width) + var(--popup-host-edge));
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.popup {
+  width: calc(var(--popup-width) + var(--popup-host-edge));
+  min-width: calc(var(--popup-width) + var(--popup-host-edge));
+  max-width: calc(var(--popup-width) + var(--popup-host-edge));
+  padding: 12px;
+  display: grid;
+  justify-items: stretch;
+  gap: 8px;
+  background: var(--bg);
+}
+
+.header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+p {
+  margin: 0;
+}
+
+small,
+#contextLabel,
+.emptyState,
+.footer {
+  color: var(--muted);
+}
+
+.section {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.switchRow,
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.switchRow span,
+.sectionHead div {
+  min-width: 0;
+}
+
+strong {
+  display: block;
+  font-size: 13px;
+}
+
+small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+input[type="checkbox"] {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #4b5563;
+  background: #202630;
+  display: block;
+  line-height: 0;
+  position: relative;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.42);
+  transition: transform 120ms ease;
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--toggle-on-border);
+  background: var(--toggle-on);
+}
+
+input[type="checkbox"]:checked::after {
+  transform: translateX(18px);
+  background: #ffffff;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input[type="text"] {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #0f1318;
+  color: var(--text);
+  padding: 0 10px;
+  outline: none;
+}
+
+input[type="text"]:focus {
+  border-color: var(--accent-2);
+}
+
+.addRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  height: 34px;
+  border: 1px solid rgba(29, 155, 240, 0.65);
+  border-radius: 6px;
+  background: rgba(29, 155, 240, 0.14);
+  color: var(--text);
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: rgba(29, 155, 240, 0.22);
+}
+
+button:disabled,
+button:disabled:hover {
+  border-color: #374151;
+  background: #151a21;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.accountList {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  overflow-y: visible;
+  scrollbar-color: #6b7280 #11151b;
+  scrollbar-width: thin;
+}
+
+.accountList:empty {
+  display: none;
+}
+
+.accountList.isScrollable {
+  max-height: 194px;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.accountList::-webkit-scrollbar {
+  width: 8px;
+}
+
+.accountList::-webkit-scrollbar-track {
+  background: #11151b;
+  border-radius: 999px;
+}
+
+.accountList::-webkit-scrollbar-thumb {
+  background: #6b7280;
+  border-radius: 999px;
+}
+
+.accountList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 0 8px 0 10px;
+}
+
+.accountList button {
+  height: 26px;
+  border-color: rgba(248, 113, 113, 0.4);
+  background: transparent;
+  color: var(--danger);
+  padding: 0 8px;
+}
+
+.emptyState {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.footer {
+  width: 100%;
+  padding: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+}

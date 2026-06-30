@@ -9,9 +9,12 @@
 
   const TAG = '[HiddenReplies]';
   const TOOLTIP = 'This reply has been marked as hidden by the creator';
+  const SETTINGS_KEY = 'hrxSettings';
+  const DEFAULT_SETTINGS = { disabledAccounts: [], disableOwnAccount: false, ownAccount: '' };
 
   const hiddenByTweet = new Map(); // root tweet id -> Set(hidden reply ids)
-  const renderWarnTimers = new Map();
+  let settings = DEFAULT_SETTINGS;
+  let lastViewerAccount = null;
   let lastTweetId = null;
   let scheduledFrame = null;
   let markLoggedFor = null;
@@ -27,6 +30,122 @@
 
   function isHiddenRepliesPage() {
     return /\/status\/\d+\/hidden(?:[/?#]|$)/.test(location.pathname);
+  }
+
+  function normalizeScreenName(value) {
+    return String(value || '').trim().replace(/^@+/, '').toLowerCase();
+  }
+
+  function normalizeSettings(input) {
+    const value = input && typeof input === 'object' ? input : {};
+    const seen = new Set();
+    const disabledAccounts = [];
+    const rawAccounts = Array.isArray(value.disabledAccounts) ? value.disabledAccounts : [];
+    for (const account of rawAccounts) {
+      const key = normalizeScreenName(account);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      disabledAccounts.push(key);
+    }
+    return {
+      disabledAccounts: disabledAccounts,
+      disableOwnAccount: value.disableOwnAccount === true,
+      ownAccount: normalizeScreenName(value.ownAccount)
+    };
+  }
+
+  function routeScreenName() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    if (!parts.length) return null;
+
+    const key = normalizeScreenName(parts[0]);
+    if (!key || isReservedPath(key)) return null;
+
+    const section = String(parts[1] || '').toLowerCase();
+    if (section === 'status' && /^\d+$/.test(String(parts[2] || ''))) return key;
+    if (parts.length === 1) return key;
+    if (/^(with_replies|media|likes|highlights|articles|followers|following|verified_followers)$/.test(section)) return key;
+    return null;
+  }
+
+  function isReservedPath(name) {
+    return /^(home|explore|notifications|messages|i|settings|compose|search|jobs|login|logout|signup|tos|privacy)$/i.test(String(name || ''));
+  }
+
+  function screenNameFromHref(href) {
+    try {
+      const u = new URL(href, location.origin);
+      if (!/(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(u.hostname)) return null;
+      const parts = u.pathname.split('/').filter(Boolean);
+      if (parts.length !== 1) return null;
+      const key = normalizeScreenName(parts[0]);
+      return key && !isReservedPath(key) ? key : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function viewerScreenName() {
+    const selectors = [
+      'a[data-testid="AppTabBar_Profile_Link"]',
+      'a[aria-label="Profile"]',
+      'nav a[href^="/"]'
+    ];
+    for (const selector of selectors) {
+      const links = document.querySelectorAll(selector);
+      for (const link of links) {
+        const key = screenNameFromHref(link.getAttribute('href') || link.href);
+        if (key) return key;
+      }
+    }
+    return settings.ownAccount || '';
+  }
+
+  function effectiveSettings() {
+    const ownAccount = viewerScreenName() || settings.ownAccount;
+    return Object.assign({}, settings, { ownAccount: ownAccount || '' });
+  }
+
+  function pageContext() {
+    const ownAccount = viewerScreenName() || settings.ownAccount || '';
+    const screenName = routeScreenName();
+    return {
+      tweetId: currentTweetId(),
+      screenName: screenName && screenName !== ownAccount ? screenName : null,
+      ownAccount: ownAccount
+    };
+  }
+
+  function postSettings() {
+    const nextSettings = effectiveSettings();
+    window.postMessage({
+      source: 'HRX_CS',
+      type: 'SETTINGS_UPDATE',
+      settings: nextSettings,
+      context: pageContext()
+    }, location.origin);
+  }
+
+  function persistDetectedOwnAccount(account) {
+    const key = normalizeScreenName(account);
+    if (!key || key === settings.ownAccount) return;
+    settings = Object.assign({}, settings, { ownAccount: key });
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+    }
+  }
+
+  function loadSettings() {
+    if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+      settings = DEFAULT_SETTINGS;
+      postSettings();
+      return;
+    }
+    chrome.storage.local.get({ [SETTINGS_KEY]: DEFAULT_SETTINGS }, (items) => {
+      settings = normalizeSettings(items && items[SETTINGS_KEY]);
+      persistDetectedOwnAccount(viewerScreenName());
+      postSettings();
+    });
   }
 
   function statusIdOf(article) {
@@ -105,7 +224,14 @@
         lastTweetId = id;
         markLoggedFor = null;
         replyCells().forEach(clearHiddenMarker);
+        postSettings();
         window.postMessage({ source: 'HRX_CS', type: 'HRX_READY', tweetId: id }, location.origin);
+      }
+      const viewer = viewerScreenName();
+      if (viewer !== lastViewerAccount) {
+        lastViewerAccount = viewer;
+        persistDetectedOwnAccount(viewer);
+        postSettings();
       }
       if (id) markHiddenReplies(id);
     });
@@ -119,22 +245,48 @@
     const ids = Array.isArray(d.ids) ? d.ids.map(String).filter(Boolean) : [];
     hiddenByTweet.set(String(d.tweetId), new Set(ids));
     console.log(TAG, 'page hook reported ' + ids.length + ' embedded hidden repl' + (ids.length === 1 ? 'y' : 'ies'));
-    clearTimeout(renderWarnTimers.get(String(d.tweetId)));
-    if (ids.length) {
-      renderWarnTimers.set(String(d.tweetId), setTimeout(() => {
-        if (currentTweetId() === String(d.tweetId) && markHiddenReplies(d.tweetId) === 0) {
-          console.warn(TAG, 'hidden replies were fetched, but X has not rendered matching native reply cells yet; refresh the tweet page after reloading the extension');
-        }
-      }, 4000));
-    }
     schedule();
   });
+
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !changes[SETTINGS_KEY]) return;
+      settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
+      postSettings();
+      schedule();
+    });
+  }
+
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (!message || message.source !== 'HRX_POPUP') return false;
+      if (message.type === 'GET_CONTEXT') {
+        persistDetectedOwnAccount(viewerScreenName());
+        if (typeof sendResponse === 'function') {
+          sendResponse({ ok: true, context: pageContext(), settings: effectiveSettings() });
+        }
+        return false;
+      }
+      if (message.type !== 'SETTINGS_CHANGED') return false;
+      loadSettings();
+      if (typeof sendResponse === 'function') sendResponse({ ok: true });
+      return false;
+    });
+  }
 
   console.log('%c[HiddenReplies]', 'color:#f59e0b;font-weight:bold', 'content script loaded - marking X-rendered hidden replies');
 
   const mo = new MutationObserver(schedule);
-  mo.observe(document.documentElement, { childList: true, subtree: true });
+  if (document.documentElement) {
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  } else {
+    window.addEventListener('DOMContentLoaded', () => {
+      if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
+      schedule();
+    }, { once: true });
+  }
   window.addEventListener('popstate', schedule);
 
+  loadSettings();
   schedule();
 })();

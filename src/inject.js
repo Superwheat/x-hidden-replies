@@ -74,7 +74,11 @@
     featuresObj: null,
     fieldTogglesObj: null,
     graphqlOrigin: null,
-    graphqlPrefix: '/graphql'
+    graphqlPrefix: '/graphql',
+    settings: { disabledAccounts: [], disableOwnAccount: false, ownAccount: '' },
+    settingsReady: false,
+    settingsReadySource: null,
+    routeContext: { tweetId: null, screenName: '' }
   };
   const moderatedPromises = new Map(); // rootId -> Promise<{ok,results,ids}>
   const moderatedMorePromises = new Map(); // rootId -> in-flight next hidden page
@@ -82,6 +86,13 @@
   const hiddenThreadRepliesByParent = new Map(); // hidden reply id -> reply children captured from a hidden thread
   const hiddenIdsByRoot = new Map();   // rootId -> hidden reply ids embedded into TweetDetail
   const debugState = window.__HRX_DEBUG__ = window.__HRX_DEBUG__ || { tweets: Object.create(null), graphqlSeen: [], fetchSeen: [], xhrSeen: [] };
+  const DEFAULT_SETTINGS = { disabledAccounts: [], disableOwnAccount: false, ownAccount: '' };
+  const SETTINGS_WAIT_MS = 1500;
+  let settingsReadyResolve = null;
+  const settingsReadyPromise = new Promise((resolve) => { settingsReadyResolve = resolve; });
+  let settingsTimeout = setTimeout(() => {
+    markSettingsReady('timeout');
+  }, SETTINGS_WAIT_MS);
 
   function debugTweet(rootId, patch) {
     if (!rootId) return;
@@ -92,6 +103,76 @@
 
   function isHiddenRepliesPage() {
     return /\/status\/\d+\/hidden(?:[/?#]|$)/.test(location.pathname);
+  }
+
+  function normalizeScreenName(value) {
+    return String(value || '').trim().replace(/^@+/, '').toLowerCase();
+  }
+
+  function normalizeSettings(settings) {
+    const input = settings && typeof settings === 'object' ? settings : {};
+    const seen = new Set();
+    const disabledAccounts = [];
+    const rawAccounts = Array.isArray(input.disabledAccounts) ? input.disabledAccounts : [];
+    for (const account of rawAccounts) {
+      const key = normalizeScreenName(account);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      disabledAccounts.push(key);
+    }
+    return {
+      disabledAccounts: disabledAccounts,
+      disableOwnAccount: input.disableOwnAccount === true,
+      ownAccount: normalizeScreenName(input.ownAccount)
+    };
+  }
+
+  function markSettingsReady(source) {
+    if (state.settingsReady) return;
+    state.settingsReady = true;
+    state.settingsReadySource = source || null;
+    if (settingsTimeout) {
+      clearTimeout(settingsTimeout);
+      settingsTimeout = null;
+    }
+    if (settingsReadyResolve) settingsReadyResolve();
+  }
+
+  function updateSettings(settings, context) {
+    state.settings = normalizeSettings(settings);
+    state.routeContext = context && typeof context === 'object' ? {
+      tweetId: context.tweetId ? String(context.tweetId) : null,
+      screenName: normalizeScreenName(context.screenName)
+    } : { tweetId: null, screenName: '' };
+    debugState.settings = {
+      disabledAccounts: state.settings.disabledAccounts.slice(),
+      disableOwnAccount: state.settings.disableOwnAccount,
+      ownAccount: state.settings.ownAccount || null,
+      routeContext: state.routeContext,
+      readyAt: Date.now()
+    };
+    markSettingsReady('content-script');
+  }
+
+  function waitForSettings() {
+    return state.settingsReady ? Promise.resolve() : settingsReadyPromise;
+  }
+
+  function disabledReasonForScreenName(screenName) {
+    const key = normalizeScreenName(screenName);
+    const settings = state.settings || DEFAULT_SETTINGS;
+    if (!key) return null;
+    if (settings.disabledAccounts.indexOf(key) !== -1) return 'ACCOUNT_DISABLED';
+    if (settings.disableOwnAccount && settings.ownAccount && key === settings.ownAccount) return 'OWN_ACCOUNT_DISABLED';
+    return null;
+  }
+
+  function disabledByRoute(rootId) {
+    const context = state.routeContext || {};
+    if (!context.screenName) return null;
+    if (context.tweetId && rootId && String(context.tweetId) !== String(rootId)) return null;
+    const reason = disabledReasonForScreenName(context.screenName);
+    return reason ? { reason: reason, screenName: context.screenName, source: 'route' } : null;
   }
 
   function debugGraphql(info, operationName) {
@@ -376,6 +457,10 @@
   function rewriteXhrTweetDetail(xhr) {
     const ctx = xhr && xhr.__hrxTweetDetailContext;
     if (!ctx || xhr.readyState !== 4 || xhr.__hrxResponseText != null) return false;
+    if (!state.settingsReady) {
+      debugTweet(ctx.rootId, { xhrRewriteSkipped: 'SETTINGS_NOT_READY' });
+      return false;
+    }
     const mod = modWithCachedThreadReplies(ctx.rootId, moderatedResults.get(ctx.rootId));
     if (!mod) {
       debugTweet(ctx.rootId, { xhrRewriteSkipped: 'MODERATED_NOT_READY' });
@@ -385,6 +470,12 @@
       const text = XHRresponseText && XHRresponseText.get ? XHRresponseText.get.call(xhr) : xhr.responseText;
       if (!text) return false;
       const json = JSON.parse(text);
+      const disabled = disabledForTweetDetail(json, ctx.rootId);
+      if (disabled) {
+        rememberHiddenIds(ctx.rootId, []);
+        debugTweet(ctx.rootId, { mergeSkipped: disabled.reason, disabledAccount: disabled.screenName, disabledSource: disabled.source });
+        return false;
+      }
       if (!applyHiddenToTweetDetailJson(json, ctx.rootId, mod)) return false;
       xhr.__hrxResponseJson = json;
       xhr.__hrxResponseText = JSON.stringify(json);
@@ -432,10 +523,20 @@
       tweetDetailVarsSource: ctx.varsSource,
       interceptedAt: Date.now()
     });
-    getModerated(ctx.rootId).then(() => {
+    waitForSettings().then(() => {
+      const disabled = disabledByRoute(ctx.rootId);
+      if (disabled) {
+        rememberHiddenIds(ctx.rootId, []);
+        debugTweet(ctx.rootId, { mergeSkipped: disabled.reason, disabledAccount: disabled.screenName, disabledSource: disabled.source });
+        return false;
+      }
+      return getModerated(ctx.rootId);
+    }).then((ready) => {
+      if (ready === false) return false;
       if (ctx.vars.cursor) return loadMoreModerated(ctx.rootId);
       return moderatedResults.get(ctx.rootId);
-    }).then(() => {
+    }).then((ready) => {
+      if (ready === false) return;
       rewriteXhrTweetDetail(xhr);
     }).catch(() => { /* ignore */ });
   }
@@ -467,7 +568,15 @@
       if (!vars || !vars.focalTweetId) return p;
       const rootId = String(vars.focalTweetId);
       debugTweet(rootId, { tweetDetailIntercepted: true, tweetDetailCursor: !!vars.cursor, tweetDetailUrl: url, tweetDetailVarsSource: varsFromUrl(url) ? 'url' : 'body', interceptedAt: Date.now() });
-      getModerated(rootId); // kick off the hidden-replies fetch in parallel
+      waitForSettings().then(() => {
+        const disabled = disabledByRoute(rootId);
+        if (disabled) {
+          rememberHiddenIds(rootId, []);
+          debugTweet(rootId, { mergeSkipped: disabled.reason, disabledAccount: disabled.screenName, disabledSource: disabled.source });
+          return null;
+        }
+        return getModerated(rootId);
+      }).catch(() => { /* ignore */ });
       return p.then((res) => mergeIntoTweetDetail(res, rootId, { loadMoreHidden: !!vars.cursor })).catch(() => p);
     }).catch(() => p);
   };
@@ -929,6 +1038,11 @@
     const d = ev.data;
     if (!d || d.source !== 'HRX_CS') return;
 
+    if (d.type === 'SETTINGS_UPDATE') {
+      updateSettings(d.settings, d.context);
+      return;
+    }
+
     if (d.type === 'HRX_READY') {
       if (d.tweetId && !isHiddenRepliesPage()) {
         postHiddenIds(d.tweetId);
@@ -964,6 +1078,29 @@
     const t = tweetFromResult(res);
     const legacy = t && t.legacy;
     return legacy && (legacy.in_reply_to_status_id_str || legacy.in_reply_to_status_id) || null;
+  }
+
+  function userScreenNameFromResult(user) {
+    if (!user || typeof user !== 'object') return null;
+    const result = user.result || user;
+    const legacy = result && result.legacy;
+    return legacy && legacy.screen_name || result && result.screen_name || null;
+  }
+
+  function tweetAuthorScreenName(res) {
+    const t = tweetFromResult(res);
+    if (!t || typeof t !== 'object') return null;
+    const core = t.core || {};
+    return userScreenNameFromResult(core.user_results) ||
+      userScreenNameFromResult(core.user_result) ||
+      userScreenNameFromResult(t.user_results) ||
+      userScreenNameFromResult(t.user_result);
+  }
+
+  function disabledForTweetDetail(json, rootId) {
+    const author = tweetAuthorScreenName(findTweetResult(json, rootId));
+    const reason = disabledReasonForScreenName(author);
+    return reason ? { reason: reason, screenName: normalizeScreenName(author), source: 'tweet-author' } : null;
   }
 
   // Collect the hidden replies as plain Tweet results (unwrapped of any
@@ -1485,7 +1622,6 @@
         }
       }
       debugTweet(rootId, { mergeSkipped: 'WAITING_FOR_REPLY_TEMPLATE' });
-      console.log(TAG, 'hidden replies fetched; waiting for X to load real reply templates before splicing');
       return 'WAITING_FOR_REPLY_TEMPLATE';
     }
   }
@@ -1493,6 +1629,13 @@
   async function mergeIntoTweetDetail(res, rootId, options) {
     try {
       const json = await res.clone().json();
+      await waitForSettings();
+      const disabled = disabledForTweetDetail(json, rootId) || disabledByRoute(rootId);
+      if (disabled) {
+        rememberHiddenIds(rootId, []);
+        debugTweet(rootId, { mergeSkipped: disabled.reason, disabledAccount: disabled.screenName, disabledSource: disabled.source });
+        return res;
+      }
       let mod = await getModerated(rootId);
       if (options && options.loadMoreHidden) mod = await loadMoreModerated(rootId);
       mod = await recoverHiddenThreadRepliesFromParent(json, rootId, mod);

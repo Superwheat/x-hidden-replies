@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X Hidden Replies Revealer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="popup">
+    <header class="header">
+      <img src="../assets/icon-128.png" alt="" class="icon">
+      <div>
+        <h1>X Hidden Replies</h1>
+        <p id="contextLabel">Settings</p>
+      </div>
+    </header>
+
+    <section class="section">
+      <label class="switchRow">
+        <span>
+          <strong>My posts</strong>
+          <small id="ownSubtitle">Detected account will appear here. Hidden replies will not be merged on your posts.</small>
+        </span>
+        <input id="ownToggle" type="checkbox">
+      </label>
+    </section>
+
+    <section class="section">
+      <div class="sectionHead">
+        <div>
+          <strong>Disabled accounts</strong>
+          <small>Hidden replies will not be merged on posts from these authors.</small>
+        </div>
+      </div>
+      <form id="addForm" class="addRow">
+        <input id="accountInput" type="text" autocomplete="off" spellcheck="false" placeholder="@account">
+        <button id="addButton" type="submit">Add</button>
+      </form>
+      <ul id="accountList" class="accountList"></ul>
+      <p id="emptyState" class="emptyState">No disabled accounts.</p>
+    </section>
+
+    <footer class="footer">
+      <span id="statusText">Changes apply on the next X page load.</span>
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
