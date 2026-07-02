@@ -7,6 +7,7 @@ Hidden replies appear inline in the conversation with a subtle amber tint.
 ## Features
 
 - Reveals author-hidden replies inline in the normal X/Twitter conversation.
+- Shows a `Hidden` pill when you open a hidden reply directly.
 - Lets you disable hidden-reply merging for your own posts or selected accounts.
 
 ## Preview
