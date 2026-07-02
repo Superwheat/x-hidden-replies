@@ -13,6 +13,7 @@
   const DEFAULT_SETTINGS = { disabledAccounts: [], disableOwnAccount: false, ownAccount: '' };
 
   const hiddenByTweet = new Map(); // root tweet id -> Set(hidden reply ids)
+  const knownHiddenReplyIds = new Set();
   let settings = DEFAULT_SETTINGS;
   let lastViewerAccount = null;
   let lastTweetId = null;
@@ -161,15 +162,80 @@
   }
 
   function setHiddenMarker(cell, id) {
+    removeFocusedHiddenLabel(cell);
+    cell.removeAttribute('data-hrx-focused-hidden-reply');
     cell.setAttribute('data-hrx-hidden-reply', 'true');
     cell.setAttribute('data-hrx-hidden-reply-id', id);
     cell.setAttribute('title', TOOLTIP);
   }
 
-  function clearHiddenMarker(cell) {
+  function setFocusedHiddenMarker(cell, id) {
     cell.removeAttribute('data-hrx-hidden-reply');
+    cell.setAttribute('data-hrx-focused-hidden-reply', 'true');
+    cell.setAttribute('data-hrx-hidden-reply-id', id);
+    cell.setAttribute('title', TOOLTIP);
+    syncFocusedHiddenLabel(cell);
+  }
+
+  function clearHiddenMarker(cell) {
+    removeFocusedHiddenLabel(cell);
+    cell.removeAttribute('data-hrx-hidden-reply');
+    cell.removeAttribute('data-hrx-focused-hidden-reply');
     cell.removeAttribute('data-hrx-hidden-reply-id');
     cell.removeAttribute('title');
+  }
+
+  function removeFocusedHiddenLabel(root) {
+    root.querySelectorAll('[data-hrx-focused-hidden-label="true"]').forEach((el) => el.remove());
+  }
+
+  function directChildContaining(parent, node) {
+    let child = node;
+    while (child && child.parentElement !== parent) child = child.parentElement;
+    return child && child.parentElement === parent ? child : null;
+  }
+
+  function focusedHiddenLabelSlot(article) {
+    const userName = article && article.querySelector('[data-testid="User-Name"]');
+    if (!userName) return null;
+
+    const action = article.querySelector('[data-testid="caret"], button[aria-label="More"], div[aria-label="More"][role="button"]');
+    if (action && !userName.contains(action)) {
+      let row = userName.parentElement;
+      while (row && row !== article) {
+        const userNameChild = directChildContaining(row, userName);
+        const actionChild = directChildContaining(row, action);
+        if (userNameChild && actionChild && userNameChild !== actionChild) {
+          return { host: row, before: actionChild, placement: 'header' };
+        }
+        row = row.parentElement;
+      }
+    }
+
+    const time = userName.querySelector('time');
+    if (time) {
+      const timeLink = time.closest('a');
+      const host = timeLink && timeLink.parentElement;
+      if (host && userName.contains(host)) return { host: host, before: null, placement: 'metadata' };
+    }
+
+    const textRows = userName.querySelectorAll('div[dir="ltr"]');
+    return { host: textRows.length ? textRows[textRows.length - 1] : userName, before: null, placement: 'metadata' };
+  }
+
+  function syncFocusedHiddenLabel(cell) {
+    const article = cell.querySelector('article');
+    const slot = focusedHiddenLabelSlot(article);
+    if (!slot || !slot.host) return;
+
+    removeFocusedHiddenLabel(cell);
+
+    const label = document.createElement('span');
+    label.setAttribute('data-hrx-focused-hidden-label', 'true');
+    label.setAttribute('data-hrx-focused-hidden-label-placement', slot.placement);
+    label.setAttribute('aria-label', 'Hidden reply');
+    label.textContent = 'Hidden';
+    slot.host.insertBefore(label, slot.before);
   }
 
   function markHiddenReplies(tweetId) {
@@ -184,10 +250,12 @@
       }
 
       const id = statusIdOf(article);
-      if (id && ids && ids.has(id) && id !== String(tweetId)) {
+      if (id && id === String(tweetId) && knownHiddenReplyIds.has(id)) {
+        setFocusedHiddenMarker(cell, id);
+      } else if (id && ids && ids.has(id) && id !== String(tweetId)) {
         setHiddenMarker(cell, id);
         marked++;
-      } else if (cell.hasAttribute('data-hrx-hidden-reply')) {
+      } else if (cell.hasAttribute('data-hrx-hidden-reply') || cell.hasAttribute('data-hrx-focused-hidden-reply')) {
         clearHiddenMarker(cell);
       }
     });
@@ -243,6 +311,7 @@
     if (!d || d.source !== 'HRX_PAGE' || d.type !== 'HIDDEN_IDS' || !d.tweetId) return;
 
     const ids = Array.isArray(d.ids) ? d.ids.map(String).filter(Boolean) : [];
+    ids.forEach((id) => knownHiddenReplyIds.add(id));
     hiddenByTweet.set(String(d.tweetId), new Set(ids));
     console.log(TAG, 'page hook reported ' + ids.length + ' embedded hidden repl' + (ids.length === 1 ? 'y' : 'ies'));
     schedule();

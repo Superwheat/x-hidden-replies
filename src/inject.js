@@ -470,6 +470,7 @@
       const text = XHRresponseText && XHRresponseText.get ? XHRresponseText.get.call(xhr) : xhr.responseText;
       if (!text) return false;
       const json = JSON.parse(text);
+      recoverFocusedHiddenStatus(json, ctx.rootId).catch(() => { /* ignore */ });
       const disabled = disabledForTweetDetail(json, ctx.rootId);
       if (disabled) {
         rememberHiddenIds(ctx.rootId, []);
@@ -1031,6 +1032,28 @@
   function rememberHiddenIds(rootId, ids) {
     hiddenIdsByRoot.set(String(rootId), Array.isArray(ids) ? ids.map(String) : []);
     postHiddenIds(rootId);
+  }
+
+  function moderatedContainsId(mod, tweetId) {
+    if (!mod || !mod.ok || !Array.isArray(mod.ids) || !tweetId) return false;
+    return mod.ids.map(String).indexOf(String(tweetId)) !== -1;
+  }
+
+  async function recoverFocusedHiddenStatus(json, rootId) {
+    if (isHiddenRepliesPage()) return false;
+    const focal = findTweetResult(json, rootId);
+    const parentId = replyParentId(focal);
+    if (!parentId || String(parentId) === String(rootId)) return false;
+
+    const mod = await getModerated(String(parentId));
+    if (!moderatedContainsId(mod, rootId)) return false;
+
+    rememberHiddenIds(String(parentId), mod.ids);
+    debugTweet(rootId, {
+      focusedHiddenReply: true,
+      focusedHiddenParentId: String(parentId)
+    });
+    return true;
   }
 
   window.addEventListener('message', (ev) => {
@@ -1630,6 +1653,7 @@
     try {
       const json = await res.clone().json();
       await waitForSettings();
+      await recoverFocusedHiddenStatus(json, rootId);
       const disabled = disabledForTweetDetail(json, rootId) || disabledByRoute(rootId);
       if (disabled) {
         rememberHiddenIds(rootId, []);
