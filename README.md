@@ -16,6 +16,8 @@ Hidden replies appear inline in the conversation with a subtle amber tint.
 
 ![Preview of a revealed hidden reply](assets/preview.png)
 
+![Focused hidden reply with Hidden pill](assets/focused-hidden-pill-preview.png)
+
 ## Install
 
 Install it from the Chrome Web Store:
